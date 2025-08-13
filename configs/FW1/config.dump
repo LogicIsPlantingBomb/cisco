@@ -1,0 +1,8 @@
+hostname FW1
+!
+interface WAN
+ ip address 192.168.{i}.2 255.255.255.0
+ no shutdown
+interface LAN
+ ip address 10.100.{i}.1 255.255.255.0
+ no shutdown

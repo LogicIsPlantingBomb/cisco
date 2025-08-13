@@ -1,0 +1,5 @@
+hostname PC1
+!
+interface Eth0
+ ip address 10.150.1.2 255.255.255.0
+ no shutdown

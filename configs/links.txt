@@ -1,0 +1,6 @@
+r1:gig0/0 - r2:gig0/0
+r1:gig0/1 - r3:gig0/0
+r2:gig0/1 - r4:gig0/0
+r3:gig0/1 - s1:fa0/1
+r4:gig0/1 - s1:fa0/2
+

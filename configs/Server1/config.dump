@@ -1,0 +1,5 @@
+hostname Server1
+!
+interface Eth0
+ ip address 10.200.1.1 255.255.255.0
+ no shutdown

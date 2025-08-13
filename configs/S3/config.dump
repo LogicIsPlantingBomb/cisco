@@ -1,0 +1,14 @@
+hostname S3
+!
+interface Fa0/1
+ switchport mode access
+!
+interface Fa0/2
+ switchport mode access
+!
+interface Fa0/3
+ switchport mode access
+!
+interface Fa0/4
+ switchport mode access
+!

@@ -1,0 +1,7 @@
+hostname R5
+!
+interface Eth0
+description Link to R4 Eth2
+ip address 10.0.45.2 255.255.255.0
+bandwidth 1000
+!

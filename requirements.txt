@@ -1,0 +1,25 @@
+# Core functionality
+networkx             # Network graph creation & analysis
+matplotlib           # Visualization of topology
+rich                 # Beautiful CLI tables, progress bars, colored logs
+psutil               # System & network resource monitoring
+pyyaml               # YAML config parsing
+jsonschema           # Validate JSON/YAML config formats
+
+# Simulation & testing
+faker                # Generate fake IPs, hostnames, and loads
+scapy                # Optional - simulate & craft network packets (needs admin privileges)
+simpy                # Process-based discrete-event simulation
+pytest               # Testing framework
+pytest-mock          # For mocking objects during tests
+
+# Performance & concurrency
+aiofiles             # Async file handling
+asyncio              # Built-in, but added for clarity in async features
+uvloop               # Fast event loop replacement for asyncio
+tqdm                 # Progress bars for long tasks
+
+# Optional debugging & dev tools
+black                # Code formatting
+flake8               # Linting
+rich

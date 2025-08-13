@@ -1,0 +1,13 @@
+hostname R4
+!
+interface Gig0/0
+ ip address 10.0.0.2 255.255.255.252
+ description Link to R1
+ bandwidth 1000
+ mtu 1500
+!
+interface Gig0/1
+ ip address 192.168.2.1 255.255.255.0
+ description Link to S1
+ bandwidth 1000
+ mtu 1500

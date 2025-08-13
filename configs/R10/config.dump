@@ -1,0 +1,9 @@
+hostname R10
+!
+interface Gig0/0
+ ip address 10.10.0.1 255.255.255.0
+ no shutdown
+!
+interface Gig0/1
+ ip address 10.10.1.1 255.255.255.0
+ no shutdown
