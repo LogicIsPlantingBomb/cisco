@@ -1,153 +1,371 @@
 """
 topology_builder.py
-Builds networkx.Graph from parsed configs and explicit link file.
-
-Graph nodes: hostname (node attribute 'parsed' contains dict)
-Graph edges: explicit links from link file, or inferred by description or subnet overlap
-Edge attributes: ifaces, mtu, bandwidth, up
+Enhanced topology builder with multiple topology types and streamlined functionality.
 """
 
 import os
 import networkx as nx
 from typing import Dict, List, Tuple, Optional
-from .config_parser import parse_links_file
-from .logger import get_logger
-from . import utils
-
+from enum import Enum
+import random
 import logging
-log = get_logger("topology_builder")
-logging.basicConfig(level=logging.INFO)  # Basic config to show logs on console
 
+# Setup basic logging
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+log = logging.getLogger("topology_builder")
 
-def build_topology(parsed_configs: Dict[str, Dict], config_dir: Optional[str] = None) -> nx.Graph:
-    """
-    Build a topology graph from parsed device configs,
-    using explicit link file if available, otherwise heuristic inference.
+class TopologyType(Enum):
+    """Supported topology types"""
+    STAR = "star"
+    RING = "ring"
+    MESH = "mesh"
+    TREE = "tree"
+    BUS = "bus"
+    HYBRID = "hybrid"
+    SPINE_LEAF = "spine_leaf"
+
+def create_star_topology(nodes: List[str]) -> nx.Graph:
+    """Create a star topology with first node as center"""
+    G = nx.Graph()
+    if len(nodes) < 2:
+        return G
     
-    Args:
-        parsed_configs: dict of hostname -> parsed config dict
-        config_dir: directory to look for links.txt (optional)
+    center = nodes[0]
+    G.add_node(center, role="hub", device_type="switch")
     
-    Returns:
-        networkx.Graph with nodes and edges with attributes
-    """
-    G = nx.MultiGraph()
+    for node in nodes[1:]:
+        G.add_node(node, role="endpoint", device_type="host")
+        G.add_edge(center, node, 
+                  bandwidth=1000, 
+                  mtu=1500, 
+                  up=True, 
+                  link_type="ethernet")
     
-    # Add nodes with parsed config as attribute, normalize interface keys
-    for host, pdata in parsed_configs.items():
-        #ost_lc = host.strip().lower()
-        if "interfaces" in pdata:
-            interfaces = pdata["interfaces"]
-            if isinstance(interfaces, list):
-                pdata["interfaces"] = {iface["name"].strip().lower(): iface for iface in interfaces if "name" in iface}
-            elif isinstance(interfaces, dict):
-                pdata["interfaces"] = {k.strip().lower(): v for k, v in interfaces.items()}
-        G.add_node(host, parsed=pdata)
-    log.info(f"Added {len(G.nodes)} device nodes")
-    
-    # Log IP and mask of each interface for debugging
-    for host, pdata in parsed_configs.items():
-        #ost_lc = host.strip().lower()
-        for ifname, ifdata in pdata.get("interfaces", {}).items():
-            ip = ifdata.get("ip", None)
-            mask = ifdata.get("mask", None)
-            log.info(f"Device {host} iface {ifname} IP: {ip} Mask: {mask}")
-
-    # Parse explicit links from links.txt if config_dir provided
-    explicit_links: List[Tuple[str, str, str, str]] = []
-    if config_dir:
-        links_file = os.path.join(config_dir, "links.txt")
-        if os.path.isfile(links_file):
-            raw_links = parse_links_file(links_file)  # returns List[Tuple[str, str]]
-            for ep1, ep2 in raw_links:
-                try:
-                    dev1, if1 = ep1.split(":")
-                    dev2, if2 = ep2.split(":")
-                    dev1 = dev1.strip().lower()
-                    if1 = if1.strip().lower()
-                    dev2 = dev2.strip().lower()
-                    if2 = if2.strip().lower()
-                    explicit_links.append((dev1, if1, dev2, if2))
-                except Exception as e:
-                    log.warning(f"Skipping malformed link entry '{ep1} - {ep2}': {e}")
-            log.info(f"Parsed {len(explicit_links)} explicit links from {links_file}")
-        else:
-            log.warning(f"No links.txt file found at {links_file}")
-
-    # Add edges from explicit links with interface existence check
-    for dev1, if1, dev2, if2 in explicit_links:
-        if dev1 in G.nodes and dev2 in G.nodes:
-            interfaces1 = parsed_configs.get(dev1, {}).get("interfaces", {})
-            interfaces2 = parsed_configs.get(dev2, {}).get("interfaces", {})
-            if if1 not in interfaces1:
-                log.warning(f"[SKIP EDGE] {dev1}:{if1} not found. Available on {dev1}: {list(interfaces1.keys())}")
-                continue
-            if if2 not in interfaces2:
-                log.warning(f"[SKIP EDGE] {dev2}:{if2} not found. Available on {dev2}: {list(interfaces2.keys())}")
-                continue
-
-            mtu1 = interfaces1.get(if1, {}).get("mtu", 1500)
-            mtu2 = interfaces2.get(if2, {}).get("mtu", 1500)
-            bw1 = interfaces1.get(if1, {}).get("bandwidth", 1000)
-            bw2 = interfaces2.get(if2, {}).get("bandwidth", 1000)
-            mtu = min(mtu1, mtu2)
-            bw = min(bw1, bw2)
-            G.add_edge(
-                dev1,
-                dev2,
-                ifaces=[f"{dev1}:{if1}", f"{dev2}:{if2}"],
-                mtu=mtu,
-                bandwidth=bw,
-                up=True,
-                source="explicit"
-            )
-            log.info(f"Added explicit edge {dev1}({if1}) <-> {dev2}({if2}) mtu={mtu} bw={bw}")
-        else:
-            log.warning(f"Explicit link skipped, unknown device(s): {dev1}, {dev2}")
-
-    # Heuristic inference for missing edges
-    hosts = list(parsed_configs.keys())
-    for i in range(len(hosts)):
-        for j in range(i + 1, len(hosts)):
-            a, b = hosts[i], hosts[j]
-            if G.has_edge(a, b):
-                continue
-
-            pa, pb = parsed_configs[a], parsed_configs[b]
-            linked = False
-
-            # 1) Description hint
-            for ifa, ifd in pa.get("interfaces", {}).items():
-                desc = ifd.get("description", "")
-                if desc and b in desc:
-                    mtu = min(ifd.get("mtu", 1500), 1500)
-                    bw = ifd.get("bandwidth", 1000)
-                    G.add_edge(a, b, ifaces=[f"{a}:{ifa}"], mtu=mtu, bandwidth=bw, up=True, source="desc_hint")
-                    linked = True
-                    log.info(f"Inferred edge (desc) {a} <-> {b} on iface {ifa}")
-                    break
-            if linked:
-                continue
-
-            # 2) Subnet overlap
-            for ifa, ifd in pa.get("interfaces", {}).items():
-                if "ip" not in ifd:
-                    continue
-                for ifb, ifdb in pb.get("interfaces", {}).items():
-                    if "ip" not in ifdb:
-                        continue
-                    try:
-                        if utils.is_same_subnet(ifd["ip"], ifd["mask"], ifdb["ip"], ifdb["mask"]):
-                            mtu = min(ifd.get("mtu", 1500), ifdb.get("mtu", 1500))
-                            bw = min(ifd.get("bandwidth", 1000), ifdb.get("bandwidth", 1000))
-                            G.add_edge(a, b, ifaces=[f"{a}:{ifa}", f"{b}:{ifb}"], mtu=mtu, bandwidth=bw, up=True, source="subnet")
-                            linked = True
-                            log.info(f"Inferred edge (subnet) {a} <-> {b} on ifaces {ifa}, {ifb}")
-                            break
-                    except Exception as e:
-                        log.warning(f"Subnet check failed for {a}:{ifa} and {b}:{ifb} - {e}")
-                if linked:
-                    break
-
-    log.info(f"Final topology: nodes={G.number_of_nodes()} edges={G.number_of_edges()}")
+    log.info(f"Created star topology with center: {center}")
     return G
+
+def create_ring_topology(nodes: List[str]) -> nx.Graph:
+    """Create a ring topology"""
+    G = nx.Graph()
+    if len(nodes) < 3:
+        return G
+    
+    for i, node in enumerate(nodes):
+        G.add_node(node, device_type="router")
+        
+    for i in range(len(nodes)):
+        next_node = (i + 1) % len(nodes)
+        G.add_edge(nodes[i], nodes[next_node],
+                  bandwidth=1000,
+                  mtu=1500,
+                  up=True,
+                  link_type="serial")
+    
+    log.info(f"Created ring topology with {len(nodes)} nodes")
+    return G
+
+def create_mesh_topology(nodes: List[str], partial: bool = False) -> nx.Graph:
+    """Create full or partial mesh topology"""
+    G = nx.Graph()
+    for node in nodes:
+        G.add_node(node, device_type="router")
+    
+    if partial:
+        # Create partial mesh (each node connects to 2-3 others randomly)
+        for node in nodes:
+            targets = random.sample([n for n in nodes if n != node], 
+                                  min(3, len(nodes) - 1))
+            for target in targets:
+                if not G.has_edge(node, target):
+                    G.add_edge(node, target,
+                              bandwidth=random.choice([100, 1000, 10000]),
+                              mtu=1500,
+                              up=True,
+                              link_type="ethernet")
+    else:
+        # Create full mesh
+        for i, node1 in enumerate(nodes):
+            for node2 in nodes[i+1:]:
+                G.add_edge(node1, node2,
+                          bandwidth=1000,
+                          mtu=1500,
+                          up=True,
+                          link_type="ethernet")
+    
+    topology_name = "partial mesh" if partial else "full mesh"
+    log.info(f"Created {topology_name} topology with {len(nodes)} nodes")
+    return G
+
+def create_tree_topology(nodes: List[str], branching_factor: int = 2) -> nx.Graph:
+    """Create a tree topology"""
+    G = nx.Graph()
+    if not nodes:
+        return G
+    
+    root = nodes[0]
+    G.add_node(root, role="root", device_type="switch", level=0)
+    
+    remaining_nodes = nodes[1:]
+    current_level_nodes = [root]
+    level = 1
+    
+    while remaining_nodes and current_level_nodes:
+        next_level_nodes = []
+        for parent in current_level_nodes:
+            children_count = min(branching_factor, len(remaining_nodes))
+            for _ in range(children_count):
+                if not remaining_nodes:
+                    break
+                child = remaining_nodes.pop(0)
+                G.add_node(child, role="branch", device_type="switch", level=level)
+                G.add_edge(parent, child,
+                          bandwidth=1000,
+                          mtu=1500,
+                          up=True,
+                          link_type="ethernet")
+                next_level_nodes.append(child)
+        
+        current_level_nodes = next_level_nodes
+        level += 1
+    
+    log.info(f"Created tree topology with {len(nodes)} nodes and branching factor {branching_factor}")
+    return G
+
+def create_spine_leaf_topology(spine_count: int = 2, leaf_count: int = 4) -> nx.Graph:
+    """Create a spine-leaf (Clos) topology"""
+    G = nx.Graph()
+    
+    # Create spine nodes
+    spine_nodes = [f"spine{i+1}" for i in range(spine_count)]
+    for spine in spine_nodes:
+        G.add_node(spine, role="spine", device_type="switch", tier="spine")
+    
+    # Create leaf nodes
+    leaf_nodes = [f"leaf{i+1}" for i in range(leaf_count)]
+    for leaf in leaf_nodes:
+        G.add_node(leaf, role="leaf", device_type="switch", tier="leaf")
+    
+    # Connect every spine to every leaf
+    for spine in spine_nodes:
+        for leaf in leaf_nodes:
+            G.add_edge(spine, leaf,
+                      bandwidth=10000,  # 10G links
+                      mtu=9000,         # Jumbo frames
+                      up=True,
+                      link_type="ethernet")
+    
+    # Add some hosts to leaves
+    host_count = 2
+    for leaf in leaf_nodes:
+        for i in range(host_count):
+            host = f"{leaf}-host{i+1}"
+            G.add_node(host, role="host", device_type="server", tier="access")
+            G.add_edge(leaf, host,
+                      bandwidth=1000,
+                      mtu=1500,
+                      up=True,
+                      link_type="ethernet")
+    
+    log.info(f"Created spine-leaf topology: {spine_count} spines, {leaf_count} leaves")
+    return G
+
+def create_bus_topology(nodes: List[str]) -> nx.Graph:
+    """Create a bus topology (linear)"""
+    G = nx.Graph()
+    if len(nodes) < 2:
+        return G
+    
+    for node in nodes:
+        G.add_node(node, device_type="workstation")
+    
+    for i in range(len(nodes) - 1):
+        G.add_edge(nodes[i], nodes[i + 1],
+                  bandwidth=100,
+                  mtu=1500,
+                  up=True,
+                  link_type="coax")
+    
+    log.info(f"Created bus topology with {len(nodes)} nodes")
+    return G
+
+def create_hybrid_topology(node_groups: Dict[str, List[str]]) -> nx.Graph:
+    """Create a hybrid topology combining different types"""
+    G = nx.Graph()
+    
+    # Create different topology sections
+    for group_type, nodes in node_groups.items():
+        if group_type == "core":
+            # Core as full mesh
+            subgraph = create_mesh_topology(nodes, partial=False)
+        elif group_type == "distribution":
+            # Distribution as ring
+            subgraph = create_ring_topology(nodes)
+        elif group_type == "access":
+            # Access as star (first node is switch, others are hosts)
+            subgraph = create_star_topology(nodes)
+        else:
+            # Default to bus
+            subgraph = create_bus_topology(nodes)
+        
+        # Add to main graph
+        G = nx.union(G, subgraph)
+    
+    # Interconnect different sections
+    if "core" in node_groups and "distribution" in node_groups:
+        core_nodes = node_groups["core"]
+        dist_nodes = node_groups["distribution"]
+        # Connect each core to each distribution
+        for core in core_nodes[:2]:  # Limit connections
+            for dist in dist_nodes[:2]:
+                G.add_edge(core, dist,
+                          bandwidth=10000,
+                          mtu=1500,
+                          up=True,
+                          link_type="fiber")
+    
+    if "distribution" in node_groups and "access" in node_groups:
+        dist_nodes = node_groups["distribution"]
+        access_switches = [node_groups["access"][0]] if node_groups["access"] else []
+        # Connect distribution to access switches
+        for dist in dist_nodes:
+            for access_sw in access_switches:
+                G.add_edge(dist, access_sw,
+                          bandwidth=1000,
+                          mtu=1500,
+                          up=True,
+                          link_type="ethernet")
+    
+    log.info(f"Created hybrid topology with {len(G.nodes)} total nodes")
+    return G
+
+def build_topology_by_type(topology_type: TopologyType, 
+                          nodes: Optional[List[str]] = None,
+                          **kwargs) -> nx.Graph:
+    """Build topology based on specified type"""
+    
+    # Default nodes if none provided
+    if nodes is None:
+        if topology_type == TopologyType.SPINE_LEAF:
+            # Special case for spine-leaf
+            return create_spine_leaf_topology(
+                spine_count=kwargs.get('spine_count', 2),
+                leaf_count=kwargs.get('leaf_count', 4)
+            )
+        else:
+            nodes = [f"node{i+1}" for i in range(kwargs.get('node_count', 5))]
+    
+    if topology_type == TopologyType.STAR:
+        return create_star_topology(nodes)
+    elif topology_type == TopologyType.RING:
+        return create_ring_topology(nodes)
+    elif topology_type == TopologyType.MESH:
+        return create_mesh_topology(nodes, kwargs.get('partial', False))
+    elif topology_type == TopologyType.TREE:
+        return create_tree_topology(nodes, kwargs.get('branching_factor', 2))
+    elif topology_type == TopologyType.BUS:
+        return create_bus_topology(nodes)
+    elif topology_type == TopologyType.HYBRID:
+        return create_hybrid_topology(kwargs.get('node_groups', {
+            'core': ['core1', 'core2'],
+            'distribution': ['dist1', 'dist2', 'dist3'],
+            'access': ['access1', 'host1', 'host2', 'host3']
+        }))
+    else:
+        log.error(f"Unsupported topology type: {topology_type}")
+        return nx.Graph()
+
+def add_topology_metrics(G: nx.Graph) -> Dict:
+    """Calculate and add topology metrics"""
+    metrics = {
+        'node_count': G.number_of_nodes(),
+        'edge_count': G.number_of_edges(),
+        'density': nx.density(G),
+        'diameter': nx.diameter(G) if nx.is_connected(G) else float('inf'),
+        'average_clustering': nx.average_clustering(G),
+        'is_connected': nx.is_connected(G)
+    }
+    
+    # Add degree statistics
+    degrees = dict(G.degree())
+    if degrees:
+        metrics['avg_degree'] = sum(degrees.values()) / len(degrees)
+        metrics['max_degree'] = max(degrees.values())
+        metrics['min_degree'] = min(degrees.values())
+    
+    log.info(f"Topology metrics: {metrics}")
+    return metrics
+
+def export_topology_summary(G: nx.Graph, filename: str = "topology_summary.txt"):
+    """Export topology summary to file"""
+    metrics = add_topology_metrics(G)
+    
+    with open(filename, 'w') as f:
+        f.write("=== Network Topology Summary ===\n\n")
+        f.write(f"Nodes: {metrics['node_count']}\n")
+        f.write(f"Edges: {metrics['edge_count']}\n")
+        f.write(f"Network Density: {metrics['density']:.3f}\n")
+        f.write(f"Connected: {'Yes' if metrics['is_connected'] else 'No'}\n")
+        
+        if metrics['is_connected']:
+            f.write(f"Network Diameter: {metrics['diameter']}\n")
+        
+        f.write(f"Average Clustering: {metrics['average_clustering']:.3f}\n")
+        f.write(f"Average Degree: {metrics.get('avg_degree', 0):.1f}\n")
+        
+        f.write("\n=== Node Details ===\n")
+        for node, data in G.nodes(data=True):
+            device_type = data.get('device_type', 'unknown')
+            role = data.get('role', 'N/A')
+            f.write(f"{node}: {device_type} (role: {role})\n")
+        
+        f.write("\n=== Edge Details ===\n")
+        for u, v, data in G.edges(data=True):
+            bandwidth = data.get('bandwidth', 'unknown')
+            link_type = data.get('link_type', 'unknown')
+            f.write(f"{u} -- {v}: {bandwidth} Mbps, {link_type}\n")
+    
+    log.info(f"Topology summary exported to {filename}")
+
+# Convenience function for quick topology creation
+def quick_topology(topology_name: str, size: str = "medium") -> nx.Graph:
+    """Create common topologies with predefined sizes"""
+    
+    size_configs = {
+        "small": {"node_count": 4, "spine_count": 2, "leaf_count": 2},
+        "medium": {"node_count": 6, "spine_count": 2, "leaf_count": 4}, 
+        "large": {"node_count": 10, "spine_count": 3, "leaf_count": 6}
+    }
+    
+    config = size_configs.get(size, size_configs["medium"])
+    
+    topology_map = {
+        "star": (TopologyType.STAR, {"node_count": config["node_count"]}),
+        "ring": (TopologyType.RING, {"node_count": config["node_count"]}),
+        "mesh": (TopologyType.MESH, {"node_count": config["node_count"], "partial": True}),
+        "tree": (TopologyType.TREE, {"node_count": config["node_count"], "branching_factor": 2}),
+        "spine_leaf": (TopologyType.SPINE_LEAF, {"spine_count": config["spine_count"], "leaf_count": config["leaf_count"]}),
+        "bus": (TopologyType.BUS, {"node_count": config["node_count"]}),
+        "hybrid": (TopologyType.HYBRID, {})
+    }
+    
+    if topology_name not in topology_map:
+        log.error(f"Unknown topology: {topology_name}")
+        return nx.Graph()
+    
+    topo_type, kwargs = topology_map[topology_name]
+    return build_topology_by_type(topo_type, **kwargs)
+
+if __name__ == "__main__":
+    # Demo different topologies
+    print("Creating sample topologies...")
+    
+    topologies = ["star", "ring", "mesh", "tree", "spine_leaf", "bus", "hybrid"]
+    
+    for topo_name in topologies:
+        print(f"\n--- {topo_name.upper()} TOPOLOGY ---")
+        G = quick_topology(topo_name, "small")
+        metrics = add_topology_metrics(G)
+        print(f"Nodes: {metrics['node_count']}, Edges: {metrics['edge_count']}, Connected: {metrics['is_connected']}")
+        
+        # Export summary for each
+        export_topology_summary(G, f"{topo_name}_topology_summary.txt")
